@@ -1,0 +1,12 @@
+mesa
+psycopg2-binary
+python-dotenv
+pandas
+catboost
+joblib
+numpy
+scikit-learn
+PySide6
+pyqtgraph
+fastapi
+uvicorn
