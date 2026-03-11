@@ -6,6 +6,7 @@ import joblib
 from dataclasses import dataclass
 from typing import List, Optional
 
+__all__ = ["AttendancePredictor", "StudentPrediction", "GroupSummary", "GroupFactorSummary", "FactorImpact"]
 
 # ==========================================================
 # ======================= DATACLASSES ======================
@@ -110,17 +111,28 @@ class AttendancePredictor:
 
         Args:
             db_config (dict, optional): Параметры подключения к БД.
+                Пример:
+                    {
+                        "host": "localhost",
+                        "user": "postgres",
+                        "password": "postgres",
+                        "port": "5432",
+                        "database": "postgres"
+                    }
             model_path (str): Путь к файлу обученной модели.
             features_path (str): Путь к сохранённому списку признаков.
         """
 
-        self.db_config = db_config or {
-            "host": "localhost",
-            "database": "ForKursovik",
-            "user": "postgres",
-            "password": "passwordforDB",
-            "port": "5432"
-        }
+        if not db_config:
+            db_config = {
+                "host": "localhost",
+                "database": "postgres",
+                "user": "postgres",
+                "password": "postgres",
+                "port": "5432"
+            }
+
+        self.db_config = db_config
 
         self.model = CatBoostClassifier()
         self.model.load_model(model_path)
@@ -170,7 +182,13 @@ class AttendancePredictor:
             FROM schedule
             WHERE lesson_id = %s
         """, (lesson_id,))
-        teacher_name = cursor.fetchone()[0]
+        row = cursor.fetchone()
+        teacher_name = row[0] if row else None
+
+        if not teacher_name:
+            cursor.close()
+            conn.close()
+            raise ValueError(f"Преподаватель не найден для занятия {lesson_id}")
 
         # Отношение к преподавателю
         cursor.execute("""
@@ -227,7 +245,8 @@ class AttendancePredictor:
             AND date < %s
             AND date >= %s
         """, (student_id, lesson_date_dt, four_weeks_ago))
-        avg_attendance_last4 = cursor.fetchone()[0]
+        row = cursor.fetchone()
+        avg_attendance_last4 = row[0] if row else 1.0
 
         # Предыдущий пропуск
         cursor.execute("""
@@ -247,7 +266,8 @@ class AttendancePredictor:
             FROM social_graph
             WHERE student_id_1 = %s
         """, (student_id,))
-        neighbors = [r[0] for r in cursor.fetchall()]
+        rows = cursor.fetchall()
+        neighbors = [r[0] for r in rows] if rows else []
 
         if neighbors:
             cursor.execute("""
@@ -468,20 +488,21 @@ class AttendancePredictor:
 # ======================== EXAMPLE =========================
 # ==========================================================
 
-predictor = AttendancePredictor()
+if __name__ == "__main__":
+    predictor = AttendancePredictor()
 
-student_result = predictor.predict_student(
-    student_id=1,
-    lesson_id=2,
-    lesson_date="2026-03-04"
-)
-print("\nПрогноз для студента:")
-print(student_result)
+    student_result = predictor.predict_student(
+        student_id=1,
+        lesson_id=2,
+        lesson_date="2026-03-04"
+    )
+    print("\nПрогноз для студента:")
+    print(student_result)
 
-group_summary = predictor.get_group_summary(
-    group=1,
-    lesson_id=2,
-    lesson_date="2026-03-04"
-)
-print("\nСводка по группе:")
-print(group_summary)
+    group_summary = predictor.get_group_summary(
+        group=1,
+        lesson_id=2,
+        lesson_date="2026-03-04"
+    )
+    print("\nСводка по группе:")
+    print(group_summary)
