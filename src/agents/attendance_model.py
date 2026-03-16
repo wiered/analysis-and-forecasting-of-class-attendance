@@ -32,16 +32,16 @@ class AttendanceModel(Model):
         self.lesson_date = lesson_date
         self.group = group
         self._student_id = student_id
-        self._reschedule_weekday = reschedule_weekday or "Wednesday"
-        self._reschedule_time_slot = reschedule_time_slot or "10:30"
+        self._reschedule_weekday = reschedule_weekday
+        self._reschedule_time_slot = reschedule_time_slot
 
         if student_id is not None:
             StudentAgent(self, student_id=student_id)
         TeacherAgent(self)
         DeaneryAgent(
             self,
-            new_weekday=self._reschedule_weekday,
-            new_time_slot=self._reschedule_time_slot,
+            new_weekday=reschedule_weekday,
+            new_time_slot=reschedule_time_slot,
         )
 
     def step(self) -> None:

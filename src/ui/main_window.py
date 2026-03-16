@@ -18,6 +18,7 @@ from .risk_indicators import RiskIndicatorsWidget
 from .forecast import ForecastWidget
 from .scenario import ScenarioWidget
 from .recommendations import RecommendationsWidget
+from .simulation import SimulationWidget
 from .api_panel import ApiPanelWidget
 
 logger = logging.getLogger(__name__)
@@ -41,5 +42,6 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(ForecastWidget(predictor), "Прогноз")
         self.tabs.addTab(ScenarioWidget(predictor), "Сценарный анализ")
         self.tabs.addTab(RecommendationsWidget(predictor), "Рекомендации")
+        self.tabs.addTab(SimulationWidget(predictor), "Симуляция")
         self.tabs.addTab(ApiPanelWidget(predictor), "API")
         layout.addWidget(self.tabs)

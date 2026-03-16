@@ -1,3 +1,4 @@
+from .constants import WEEKDAYS, TIME_SLOTS
 from .predict import (
     AttendancePredictor,
     StudentPrediction,
@@ -5,6 +6,7 @@ from .predict import (
     GroupFactorSummary,
     FactorImpact,
     RescheduleEffect,
+    BestSlotResult,
 )
 
 __all__ = [
@@ -14,4 +16,7 @@ __all__ = [
     "GroupFactorSummary",
     "FactorImpact",
     "RescheduleEffect",
+    "BestSlotResult",
+    "WEEKDAYS",
+    "TIME_SLOTS",
 ]

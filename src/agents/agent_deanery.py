@@ -1,33 +1,131 @@
+from dataclasses import dataclass
+from typing import List, Optional, TYPE_CHECKING
 from mesa import Agent
-from typing import Optional, TYPE_CHECKING
+
+from src.utils import map_group_factors
 
 if TYPE_CHECKING:
     from .attendance_model import AttendanceModel
 
 
+@dataclass
+class DeaneryDecision:
+    """
+    Управленческие решения деканата на основе агрегированных данных.
+
+    Attributes:
+        schedule_decision (str): Рекомендация по расписанию (оставить/перенести и обоснование).
+        classroom_recommendation (str): Рекомендация по аудитории (вместимость, тип).
+        notification_actions (List[str]): Действия по адресным уведомлениям.
+        group_summary_text (str): Человекочитаемое описание сводки по группе (map_group_factors).
+    """
+    schedule_decision: str
+    classroom_recommendation: str
+    notification_actions: List[str]
+    group_summary_text: str = ""
+
+
 class DeaneryAgent(Agent):
     """
-    Агент деканата: вычисляет ожидаемый эффект от переноса занятия.
-    В step() вызывает get_reschedule_effect и сохраняет результат в self.reschedule_effect.
+    Агент деканата: принимает управленческие решения по расписанию, аудиториям
+    и адресным уведомлениям на основе агрегированных данных (сводка по группе,
+    эффект переноса).
     """
 
     def __init__(
         self,
         model: "AttendanceModel",
-        new_weekday: str,
-        new_time_slot: str,
+        new_weekday: Optional[str] = None,
+        new_time_slot: Optional[str] = None,
     ):
         super().__init__(model)
         self.new_weekday = new_weekday
         self.new_time_slot = new_time_slot
         self.reschedule_effect = None
+        self.decision: Optional[DeaneryDecision] = None
 
     def step(self) -> None:
         model = self.model
-        self.reschedule_effect = model.predictor.get_reschedule_effect(
+        summary = model.predictor.get_group_summary(
             model.group,
             model.lesson_id,
             model.lesson_date,
-            self.new_weekday,
-            self.new_time_slot,
+        )
+
+        if self.new_weekday is not None and self.new_time_slot is not None:
+            self.reschedule_effect = model.predictor.get_reschedule_effect(
+                model.group,
+                model.lesson_id,
+                model.lesson_date,
+                self.new_weekday,
+                self.new_time_slot,
+            )
+        else:
+            best = model.predictor.find_best_reschedule_slot(
+                model.group,
+                model.lesson_id,
+                model.lesson_date,
+            )
+            self.new_weekday = best.best_weekday
+            self.new_time_slot = best.best_time_slot
+            self.reschedule_effect = best.reschedule_effect
+
+        eff = self.reschedule_effect
+        current_slot_text = ""
+        if eff.delta <= 0.05:
+            current = model.predictor.get_lesson_schedule(model.lesson_id)
+            if current:
+                current_slot_text = f" (текущий слот: {current[0]} {current[1]})"
+
+        if eff.delta > 0.05:
+            schedule_decision = (
+                f"Рекомендуется перенос: {model.lesson_date} → {self.new_weekday} {self.new_time_slot}. "
+                f"Ожидаемый рост посещаемости на {eff.delta:.0%}, доля в зоне риска снизится с "
+                f"{eff.risk_pct_before:.0%} до {eff.risk_pct_after:.0%}."
+            )
+        elif eff.delta < -0.05:
+            schedule_decision = (
+                f"Перенос не рекомендуется: при смене на {self.new_weekday} {self.new_time_slot} "
+                f"посещаемость ожидаемо снизится на {abs(eff.delta):.0%}. Оставить текущее расписание."
+            )
+        else:
+            schedule_decision = (
+                f"Существенного эффекта от переноса на {self.new_weekday} {self.new_time_slot} не ожидается "
+                f"(Δ ≈ {eff.delta:.0%}). Расписание можно оставить без изменений{current_slot_text}."
+            )
+
+        # Рекомендация по аудитории (ожидаемое число пришедших)
+        expected_attend = int(summary.total_students * summary.avg_attendance_probability + 0.5)
+        if summary.total_students <= 0:
+            classroom_recommendation = "Нет данных по группе; выбрать аудиторию по списку группы."
+        elif expected_attend <= 0:
+            classroom_recommendation = (
+                f"Ожидаемая явка очень низкая ({summary.total_students} в группе). "
+                "Занятие в малой аудитории или общий сбор с другими группами."
+            )
+        else:
+            margin = max(2, expected_attend // 5)
+            classroom_recommendation = (
+                f"Ожидаемая явка ≈ {expected_attend} из {summary.total_students}. "
+                f"Рекомендуется аудитория на {expected_attend + margin}+ мест."
+            )
+
+        # Адресные уведомления
+        notification_actions: List[str] = []
+        if summary.students_at_risk > 0:
+            notification_actions.append(
+                f"Направить напоминание о занятии {summary.students_at_risk} студентам в зоне риска пропуска."
+            )
+        if summary.risk_percentage > 40:
+            notification_actions.append(
+                "Разослать в чат группы краткое напоминание о дате, времени и месте занятия."
+            )
+        if not notification_actions:
+            notification_actions.append("Дополнительные уведомления не требуются.")
+
+        self.decision = DeaneryDecision(
+            schedule_decision=schedule_decision,
+            classroom_recommendation=classroom_recommendation,
+            notification_actions=notification_actions,
+            group_summary_text=map_group_factors(summary),
         )

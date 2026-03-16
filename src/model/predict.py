@@ -6,9 +6,11 @@ from catboost import CatBoostClassifier, Pool
 from datetime import datetime, timedelta
 import joblib
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+from .constants import WEEKDAYS, TIME_SLOTS
 
 # Корень репозитория (родитель каталога src/)
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -20,6 +22,9 @@ __all__ = [
     "GroupFactorSummary",
     "FactorImpact",
     "RescheduleEffect",
+    "BestSlotResult",
+    "WEEKDAYS",
+    "TIME_SLOTS",
 ]
 
 # ==========================================================
@@ -121,6 +126,25 @@ class RescheduleEffect:
     delta: float
     risk_pct_before: float
     risk_pct_after: float
+
+
+@dataclass
+class BestSlotResult:
+    """
+    Результат поиска лучшего слота для переноса занятия.
+
+    Attributes:
+        best_weekday (str): День недели лучшего слота.
+        best_time_slot (str): Время лучшего слота.
+        reschedule_effect (RescheduleEffect): Эффект переноса в этот слот.
+        current_weekday (Optional[str]): Текущий день занятия (из БД), или None.
+        current_time_slot (Optional[str]): Текущее время занятия (из БД), или None.
+    """
+    best_weekday: str
+    best_time_slot: str
+    reschedule_effect: RescheduleEffect
+    current_weekday: Optional[str] = None
+    current_time_slot: Optional[str] = None
 
 
 # ==========================================================
@@ -627,6 +651,39 @@ class AttendancePredictor:
         )
 
     # ======================================================
+    # ============== LESSON SCHEDULE =======================
+    # ======================================================
+
+    def get_lesson_schedule(self, lesson_id: int) -> Optional[Tuple[str, str, int]]:
+        """
+        Возвращает текущее расписание занятия из БД.
+
+        Args:
+            lesson_id: ID занятия.
+
+        Returns:
+            (weekday, time_slot, duration) или None, если запись не найдена.
+            duration в минутах (int).
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT weekday, time_slot, duration
+                FROM schedule
+                WHERE lesson_id = %s
+            """, (lesson_id,))
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            weekday, time_slot, duration = row
+            duration_int = int(duration) if duration is not None else 90
+            return (weekday, time_slot, duration_int)
+        finally:
+            cursor.close()
+            conn.close()
+
+    # ======================================================
     # ============== RESCHEDULE EFFECT =====================
     # ======================================================
 
@@ -672,6 +729,87 @@ class AttendancePredictor:
             delta=round(delta, 4),
             risk_pct_before=summary_before.risk_percentage,
             risk_pct_after=summary_after.risk_percentage,
+        )
+
+    def find_best_reschedule_slot(
+        self,
+        group: int,
+        lesson_id: int,
+        lesson_date: str,
+        candidate_slots: Optional[List[Tuple[str, str]]] = None,
+    ) -> BestSlotResult:
+        """
+        Находит лучший слот для переноса занятия по критерию максимума delta
+        (рост посещаемости); при равенстве — минимум risk_pct_after.
+
+        Текущий слот занятия (из БД) исключается из кандидатов.
+
+        Args:
+            group: Номер группы.
+            lesson_id: ID занятия.
+            lesson_date: Дата занятия (YYYY-MM-DD).
+            candidate_slots: Список (weekday, time_slot) или None — тогда
+                используются WEEKDAYS × TIME_SLOTS.
+
+        Returns:
+            BestSlotResult: лучший слот, эффект и текущий слот (если есть).
+        """
+        current = self.get_lesson_schedule(lesson_id)
+        current_pair: Optional[Tuple[str, str]] = None
+        current_weekday: Optional[str] = None
+        current_time_slot: Optional[str] = None
+        if current is not None:
+            current_weekday, current_time_slot, _ = current
+            current_pair = (current_weekday, current_time_slot)
+
+        if candidate_slots is None:
+            candidate_slots = [
+                (wd, ts) for wd in WEEKDAYS for ts in TIME_SLOTS
+            ]
+        candidates = [
+            (wd, ts) for (wd, ts) in candidate_slots
+            if current_pair is None or (wd, ts) != current_pair
+        ]
+        if not candidates:
+            summary_before = self.get_group_summary(
+                group, lesson_id, lesson_date, schedule_override=None
+            )
+            eff = RescheduleEffect(
+                avg_attendance_before=summary_before.avg_attendance_probability,
+                avg_attendance_after=summary_before.avg_attendance_probability,
+                delta=0.0,
+                risk_pct_before=summary_before.risk_percentage,
+                risk_pct_after=summary_before.risk_percentage,
+            )
+            return BestSlotResult(
+                best_weekday=current_weekday or "Wednesday",
+                best_time_slot=current_time_slot or "10:30",
+                reschedule_effect=eff,
+                current_weekday=current_weekday,
+                current_time_slot=current_time_slot,
+            )
+
+        best_weekday, best_time_slot = candidates[0]
+        best_effect = self.get_reschedule_effect(
+            group, lesson_id, lesson_date, best_weekday, best_time_slot
+        )
+        for wd, ts in candidates[1:]:
+            eff = self.get_reschedule_effect(
+                group, lesson_id, lesson_date, wd, ts
+            )
+            if eff.delta > best_effect.delta or (
+                eff.delta == best_effect.delta
+                and eff.risk_pct_after < best_effect.risk_pct_after
+            ):
+                best_weekday, best_time_slot = wd, ts
+                best_effect = eff
+
+        return BestSlotResult(
+            best_weekday=best_weekday,
+            best_time_slot=best_time_slot,
+            reschedule_effect=best_effect,
+            current_weekday=current_weekday,
+            current_time_slot=current_time_slot,
         )
 
 

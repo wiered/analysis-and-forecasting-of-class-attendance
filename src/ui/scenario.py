@@ -16,22 +16,12 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QDate
 
-from src.model import AttendancePredictor, RescheduleEffect
+from src.model import AttendancePredictor, RescheduleEffect, WEEKDAYS, TIME_SLOTS
 
 from .charts import plot_reschedule_attendance, plot_reschedule_risk
 from .workers import RescheduleEffectWorker, run_worker
 
 logger = logging.getLogger(__name__)
-
-WEEKDAYS = [
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-]
-TIME_SLOTS = ["08:30", "09:00", "10:30", "12:00", "14:00", "16:00"]
 
 
 class ScenarioWidget(QWidget):

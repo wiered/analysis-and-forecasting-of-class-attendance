@@ -3,6 +3,7 @@
 Результаты передаются в UI через сигналы.
 """
 import logging
+from datetime import date, timedelta
 from typing import Optional, List
 
 from PySide6.QtCore import QObject, Signal, QThread, Qt, QTimer
@@ -12,8 +13,16 @@ from src.model import (
     StudentPrediction,
     GroupSummary,
     RescheduleEffect,
+    BestSlotResult,
 )
-from src.agents import AttendanceModel, LessonPolicy
+from src.agents import (
+    AttendanceModel,
+    LessonPolicy,
+    StudentAgent,
+    TeacherAgent,
+    DeaneryAgent,
+)
+from src.utils import map_factors
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +158,43 @@ class RescheduleEffectWorker(QObject):
             self.error.emit(str(e))
 
 
+class BestSlotWorker(QObject):
+    """Вызов find_best_reschedule_slot в фоне."""
+    finished = Signal(object)   # BestSlotResult
+    error = Signal(str)
+
+    def __init__(
+        self,
+        predictor: AttendancePredictor,
+        group: int,
+        lesson_id: int,
+        lesson_date: str,
+    ):
+        super().__init__()
+        self.predictor = predictor
+        self.group = group
+        self.lesson_id = lesson_id
+        self.lesson_date = lesson_date
+
+    def _schedule_run(self) -> None:
+        QTimer.singleShot(0, self.run)
+
+    def run(self) -> None:
+        try:
+            result = self.predictor.find_best_reschedule_slot(
+                self.group,
+                self.lesson_id,
+                self.lesson_date,
+            )
+            self.finished.emit(result)
+        except Exception as e:
+            logger.exception(
+                "find_best_reschedule_slot failed: group=%s lesson_id=%s",
+                self.group, self.lesson_id,
+            )
+            self.error.emit(str(e))
+
+
 class RecommendationsWorker(QObject):
     """Запуск AttendanceModel.step() и получение policy от TeacherAgent."""
     finished = Signal(object)   # LessonPolicy
@@ -193,6 +239,122 @@ class RecommendationsWorker(QObject):
             self.finished.emit(teacher_agents[0].policy)
         except Exception as e:
             logger.exception("recommendations failed: group=%s lesson_id=%s lesson_date=%s", self.group, self.lesson_id, self.lesson_date)
+            self.error.emit(str(e))
+
+
+def _next_weekdays(start: date, count: int = 5) -> List[date]:
+    """Следующие count рабочих дней (Пн–Пт) начиная с start."""
+    out: List[date] = []
+    d = start
+    while len(out) < count:
+        if d.weekday() < 5:  # 0=Mon .. 4=Fri
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+WEEKDAY_NAMES = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+
+
+class SimulationWorker(QObject):
+    """
+    Симуляция 1 недели (5 рабочих дней): студенты решают идти/не идти,
+    преподаватель выбирает стратегии, деканат принимает решения по расписанию и уведомлениям.
+    Логи формируются через Mesa-агентов и предиктор.
+    """
+    finished = Signal(str)   # полный текст лога
+    error = Signal(str)
+
+    def __init__(
+        self,
+        predictor: AttendancePredictor,
+        group: int,
+        lesson_id: int,
+        start_date: date,
+        reschedule_weekday: str = "Wednesday",
+        reschedule_time_slot: str = "10:30",
+    ):
+        super().__init__()
+        self.predictor = predictor
+        self.group = group
+        self.lesson_id = lesson_id
+        self.start_date = start_date
+        self.reschedule_weekday = reschedule_weekday
+        self.reschedule_time_slot = reschedule_time_slot
+
+    def _schedule_run(self) -> None:
+        QTimer.singleShot(0, self.run)
+
+    def run(self) -> None:
+        try:
+            days = _next_weekdays(self.start_date, 5)
+            lines: List[str] = []
+            lines.append("=== СИМУЛЯЦИЯ НЕДЕЛИ (5 рабочих дней) ===")
+            lines.append(f"Группа: {self.group}, Занятие ID: {self.lesson_id}")
+            lines.append("")
+
+            for day_num, d in enumerate(days, 1):
+                date_str = d.strftime("%Y-%m-%d")
+                wd = WEEKDAY_NAMES[d.weekday()]
+                lines.append("")
+                lines.append(f"——— День {day_num} ({date_str}, {wd}) ———")
+
+                # Прогноз по группе → «решения» студентов (как в агентах)
+                try:
+                    predictions = self.predictor.predict_group(
+                        self.group, self.lesson_id, date_str, verbose=False
+                    )
+                except Exception as e:
+                    lines.append(f"  [Ошибка прогноза по группе: {e}]")
+                    predictions = []
+
+                for p in predictions:
+                    attend = p.attendance_probability >= 0.5
+                    name = (p.full_name or f"Студент {p.student_id}").strip()
+                    reasons = map_factors(p.top_factors) if p.top_factors else "Нет данных."
+                    decision = "идёт" if attend else "пропускает"
+                    lines.append(f"  [Студент] {name}: решение — {decision}. {reasons}")
+
+                if not predictions:
+                    lines.append("  [Студент] Нет данных по группе.")
+
+                # Mesa: преподаватель и деканат
+                try:
+                    model = AttendanceModel(
+                        predictor=self.predictor,
+                        lesson_id=self.lesson_id,
+                        lesson_date=date_str,
+                        group=self.group,
+                        reschedule_weekday=self.reschedule_weekday,
+                        reschedule_time_slot=self.reschedule_time_slot,
+                    )
+                    model.step()
+                except Exception as e:
+                    lines.append(f"  [Ошибка Mesa: {e}]")
+                    self.finished.emit("\n".join(lines))
+                    return
+
+                teacher_agents = [a for a in model.agents if isinstance(a, TeacherAgent)]
+                if teacher_agents and teacher_agents[0].policy:
+                    pol = teacher_agents[0].policy
+                    lines.append(f"  [Преподаватель] Политика: интерактив={pol.use_interactive}, квизы={pol.use_quizzes}, контроль={pol.strengthen_attendance_control}.")
+                    for t in pol.tactics[:3]:
+                        lines.append(f"    Тактика: {t.name} ({t.priority}) — {t.description}")
+                    if pol.recommendations:
+                        lines.append(f"    Рекомендации: {'; '.join(pol.recommendations[:3])}.")
+
+                deanery_agents = [a for a in model.agents if isinstance(a, DeaneryAgent)]
+                if deanery_agents and deanery_agents[0].decision:
+                    dec = deanery_agents[0].decision
+                    lines.append(f"  [Деканат] Расписание: {dec.schedule_decision[:120]}…" if len(dec.schedule_decision) > 120 else f"  [Деканат] Расписание: {dec.schedule_decision}")
+                    lines.append(f"  [Деканат] Аудитория: {dec.classroom_recommendation}")
+                    for act in dec.notification_actions:
+                        lines.append(f"  [Деканат] Уведомления: {act}")
+
+            log_text = "\n".join(lines)
+            self.finished.emit(log_text)
+        except Exception as e:
+            logger.exception("SimulationWorker.run failed: group=%s lesson_id=%s", self.group, self.lesson_id)
             self.error.emit(str(e))
 
 
