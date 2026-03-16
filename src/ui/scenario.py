@@ -16,10 +16,16 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QDate
 
-from src.model import AttendancePredictor, RescheduleEffect, WEEKDAYS, TIME_SLOTS
+from src.model import (
+    AttendancePredictor,
+    RescheduleEffect,
+    BestSlotResult,
+    WEEKDAYS,
+    TIME_SLOTS,
+)
 
 from .charts import plot_reschedule_attendance, plot_reschedule_risk
-from .workers import RescheduleEffectWorker, run_worker
+from .workers import RescheduleEffectWorker, BestSlotWorker, run_worker
 
 logger = logging.getLogger(__name__)
 
@@ -61,9 +67,13 @@ class ScenarioWidget(QWidget):
 
         layout.addLayout(form)
 
-        btn = QPushButton("Рассчитать эффект переноса")
-        btn.clicked.connect(self._on_calc)
-        layout.addWidget(btn)
+        btn_calc = QPushButton("Рассчитать эффект переноса")
+        btn_calc.clicked.connect(self._on_calc)
+        layout.addWidget(btn_calc)
+
+        btn_best = QPushButton("Подобрать лучший слот")
+        btn_best.clicked.connect(self._on_best_slot)
+        layout.addWidget(btn_best)
 
         self.status_label = QLabel("Введите параметры и нажмите кнопку.")
         self.status_label.setWordWrap(True)
@@ -93,6 +103,9 @@ class ScenarioWidget(QWidget):
         lesson_date = self.date_edit.date().toString("yyyy-MM-dd")
         new_weekday = self.weekday_combo.currentText()
         new_time_slot = self.time_combo.currentText()
+        self._last_lesson_id = lesson_id
+        self._last_new_weekday = new_weekday
+        self._last_new_time_slot = new_time_slot
 
         self.status_label.setText("Расчёт…")
         self.result_frame.setVisible(False)
@@ -108,18 +121,66 @@ class ScenarioWidget(QWidget):
         self._thread.finished.connect(lambda: setattr(self, "_thread", None))
         self._thread.finished.connect(lambda: setattr(self, "_worker", None))
 
-    def _on_result(self, effect: RescheduleEffect) -> None:
-        self.status_label.setText("")
-        delta_sign = "+" if effect.delta >= 0 else ""
-        self.result_label.setText(
-            "До переноса:\n"
-            f"  Средняя вероятность посещения: {effect.avg_attendance_before:.2%}\n"
-            f"  Доля в зоне риска: {effect.risk_pct_before}%\n\n"
-            "После переноса:\n"
-            f"  Средняя вероятность посещения: {effect.avg_attendance_after:.2%}\n"
-            f"  Доля в зоне риска: {effect.risk_pct_after}%\n\n"
-            f"Изменение средней посещаемости: {delta_sign}{effect.delta:.2%}"
+    def _on_best_slot(self) -> None:
+        if not self.predictor:
+            self.status_label.setText("Предиктор недоступен.")
+            return
+        group = self.group_spin.value()
+        lesson_id = self.lesson_spin.value()
+        lesson_date = self.date_edit.date().toString("yyyy-MM-dd")
+        self.status_label.setText("Поиск лучшего слота…")
+        self.result_frame.setVisible(False)
+        self._worker = BestSlotWorker(self.predictor, group, lesson_id, lesson_date)
+        self._thread = run_worker(
+            self._worker,
+            on_finished=self._on_best_slot_result,
+            on_error=self._on_error,
         )
+        self._thread.finished.connect(lambda: setattr(self, "_thread", None))
+        self._thread.finished.connect(lambda: setattr(self, "_worker", None))
+
+    def _on_best_slot_result(self, result: BestSlotResult) -> None:
+        self.weekday_combo.setCurrentText(result.best_weekday)
+        self.time_combo.setCurrentText(result.best_time_slot)
+        self.status_label.setText("")
+        from_slot = None
+        if result.current_weekday and result.current_time_slot:
+            from_slot = f"{result.current_weekday} {result.current_time_slot}"
+        to_slot = f"{result.best_weekday} {result.best_time_slot}"
+        self._on_result(result.reschedule_effect, from_slot=from_slot, to_slot=to_slot)
+
+    def _on_result(
+        self,
+        effect: RescheduleEffect,
+        from_slot: Optional[str] = None,
+        to_slot: Optional[str] = None,
+    ) -> None:
+        self.status_label.setText("")
+        if from_slot is None and to_slot is None and getattr(self, "_last_lesson_id", None) and self.predictor:
+            try:
+                current = self.predictor.get_lesson_schedule(self._last_lesson_id)
+                if current:
+                    from_slot = f"{current[0]} {current[1]}"
+                to_slot = f"{getattr(self, '_last_new_weekday', '')} {getattr(self, '_last_new_time_slot', '')}".strip()
+            except Exception:
+                pass
+        lines = []
+        if from_slot and to_slot:
+            lines.append(f"Перенос: {from_slot} → {to_slot}")
+            lines.append("")
+        delta_sign = "+" if effect.delta >= 0 else ""
+        lines.extend([
+            "До переноса:",
+            f"  Средняя вероятность посещения: {effect.avg_attendance_before:.2%}",
+            f"  Доля в зоне риска: {effect.risk_pct_before}%",
+            "",
+            "После переноса:",
+            f"  Средняя вероятность посещения: {effect.avg_attendance_after:.2%}",
+            f"  Доля в зоне риска: {effect.risk_pct_after}%",
+            "",
+            f"Изменение средней посещаемости: {delta_sign}{effect.delta:.2%}",
+        ])
+        self.result_label.setText("\n".join(lines))
         plot_reschedule_attendance(self.plot_att.getPlotItem(), effect)
         plot_reschedule_risk(self.plot_risk.getPlotItem(), effect)
         self.result_frame.setVisible(True)

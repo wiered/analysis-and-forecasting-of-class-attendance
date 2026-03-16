@@ -96,6 +96,26 @@ def create_app(predictor: Optional[AttendancePredictor] = None) -> FastAPI:
             "risk_pct_after": effect.risk_pct_after,
         }
 
+    @app.get("/best_reschedule_slot")
+    def best_reschedule_slot(
+        group: int = Query(...),
+        lesson_id: int = Query(...),
+        lesson_date: str = Query(...),
+    ):
+        p = require_predictor()
+        result = p.find_best_reschedule_slot(group, lesson_id, lesson_date)
+        return {
+            "best_weekday": result.best_weekday,
+            "best_time_slot": result.best_time_slot,
+            "current_weekday": result.current_weekday,
+            "current_time_slot": result.current_time_slot,
+            "avg_attendance_before": result.reschedule_effect.avg_attendance_before,
+            "avg_attendance_after": result.reschedule_effect.avg_attendance_after,
+            "delta": result.reschedule_effect.delta,
+            "risk_pct_before": result.reschedule_effect.risk_pct_before,
+            "risk_pct_after": result.reschedule_effect.risk_pct_after,
+        }
+
     @app.get("/recommendations")
     def recommendations(
         group: int = Query(...),

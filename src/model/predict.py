@@ -8,9 +8,9 @@ import joblib
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
-
 from .constants import WEEKDAYS, TIME_SLOTS
+
+logger = logging.getLogger(__name__)
 
 # Корень репозитория (родитель каталога src/)
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -145,6 +145,86 @@ class BestSlotResult:
     reschedule_effect: RescheduleEffect
     current_weekday: Optional[str] = None
     current_time_slot: Optional[str] = None
+
+
+# Ранние и поздние слоты для эвристик подбора (индексы в TIME_SLOTS)
+_EARLY_TIME_SLOTS = ("08:30", "09:00")
+_LATE_TIME_SLOT = "16:00"
+_MID_WEEKDAYS = ("Wednesday", "Thursday")
+
+
+def _build_smart_candidates(
+    current_weekday: Optional[str],
+    current_time_slot: Optional[str],
+    group_summary: Optional[GroupSummary] = None,
+    max_candidates: int = 12,
+) -> List[Tuple[str, str]]:
+    """
+    Строит короткий список перспективных слотов для переноса по эвристикам:
+    ранняя пара -> более позднее время; поздняя -> более раннее; средняя -> соседние.
+    Учитывает top_group_factors (early_class, time_slot, weekday) для набора дней/времён.
+    """
+    factor_names = set()
+    if group_summary and group_summary.top_group_factors:
+        factor_names = {gf.feature for gf in group_summary.top_group_factors}
+
+    current_pair = (current_weekday, current_time_slot) if (current_weekday and current_time_slot) else None
+
+    def exclude_current(wd: str, ts: str) -> bool:
+        return current_pair is None or (wd, ts) != current_pair
+
+    # Выбор времён по типу текущего слота
+    if current_time_slot in _EARLY_TIME_SLOTS:
+        # Ранняя пара -> пробуем более позднее время
+        preferred_times = [t for t in TIME_SLOTS if t not in _EARLY_TIME_SLOTS]
+    elif current_time_slot == _LATE_TIME_SLOT:
+        # Поздняя пара -> более раннее время (не 08:30/09:00 и не 16:00)
+        preferred_times = ["10:30", "12:00", "14:00"]
+    elif current_time_slot in ("10:30", "12:00", "14:00"):
+        # Средняя пара -> соседние по времени
+        idx = TIME_SLOTS.index(current_time_slot)
+        neighbor_idxs = [i for i in (idx - 1, idx + 1) if 0 <= i < len(TIME_SLOTS)]
+        preferred_times = [TIME_SLOTS[i] for i in neighbor_idxs]
+        if not preferred_times:
+            preferred_times = ["10:30", "12:00", "14:00"]
+    else:
+        preferred_times = ["10:30", "12:00", "14:00"]
+
+    # Дни: тот же, затем 1–2 «хороших» (среда, четверг)
+    use_extra_weekdays = (current_weekday is not None and current_weekday in WEEKDAYS) or "weekday" in factor_names
+    if current_weekday and current_weekday in WEEKDAYS:
+        weekdays_same_first = [current_weekday]
+        for w in _MID_WEEKDAYS:
+            if w != current_weekday and w not in weekdays_same_first:
+                weekdays_same_first.append(w)
+                if len(weekdays_same_first) >= 3:
+                    break
+        if not use_extra_weekdays:
+            weekdays_same_first = [current_weekday]
+    else:
+        weekdays_same_first = list(_MID_WEEKDAYS)[:3]
+
+    # Сначала «тот же день, другое время», затем «другой день»
+    candidates: List[Tuple[str, str]] = []
+    for wd in weekdays_same_first:
+        for ts in preferred_times:
+            if exclude_current(wd, ts):
+                candidates.append((wd, ts))
+            if len(candidates) >= max_candidates:
+                return candidates
+
+    # Если мало набрали — добавить слоты с другими днями/временами
+    if len(candidates) < max_candidates and use_extra_weekdays:
+        for wd in WEEKDAYS:
+            if wd in weekdays_same_first:
+                continue
+            for ts in preferred_times[:3]:
+                if exclude_current(wd, ts) and (wd, ts) not in candidates:
+                    candidates.append((wd, ts))
+                    if len(candidates) >= max_candidates:
+                        return candidates
+
+    return candidates[:max_candidates]
 
 
 # ==========================================================
@@ -737,19 +817,24 @@ class AttendancePredictor:
         lesson_id: int,
         lesson_date: str,
         candidate_slots: Optional[List[Tuple[str, str]]] = None,
+        smart_search: bool = True,
     ) -> BestSlotResult:
         """
         Находит лучший слот для переноса занятия по критерию максимума delta
         (рост посещаемости); при равенстве — минимум risk_pct_after.
 
         Текущий слот занятия (из БД) исключается из кандидатов.
+        При smart_search=True и candidate_slots=None используется сокращённый
+        список кандидатов по эвристикам (ранняя/поздняя пара, факторы группы).
+        Расчёт «до» выполняется один раз (1+N вызовов get_group_summary).
 
         Args:
             group: Номер группы.
             lesson_id: ID занятия.
             lesson_date: Дата занятия (YYYY-MM-DD).
             candidate_slots: Список (weekday, time_slot) или None — тогда
-                используются WEEKDAYS × TIME_SLOTS.
+                при smart_search=True строится умный список, иначе WEEKDAYS × TIME_SLOTS.
+            smart_search: При True и candidate_slots=None строить короткий список по эвристикам.
 
         Returns:
             BestSlotResult: лучший слот, эффект и текущий слот (если есть).
@@ -762,18 +847,31 @@ class AttendancePredictor:
             current_weekday, current_time_slot, _ = current
             current_pair = (current_weekday, current_time_slot)
 
+        # Один раз сводка «до»
+        summary_before = self.get_group_summary(
+            group, lesson_id, lesson_date, schedule_override=None
+        )
+
         if candidate_slots is None:
-            candidate_slots = [
-                (wd, ts) for wd in WEEKDAYS for ts in TIME_SLOTS
+            if smart_search:
+                candidates = _build_smart_candidates(
+                    current_weekday,
+                    current_time_slot,
+                    group_summary=summary_before,
+                    max_candidates=12,
+                )
+            else:
+                candidates = [
+                    (wd, ts) for wd in WEEKDAYS for ts in TIME_SLOTS
+                    if current_pair is None or (wd, ts) != current_pair
+                ]
+        else:
+            candidates = [
+                (wd, ts) for (wd, ts) in candidate_slots
+                if current_pair is None or (wd, ts) != current_pair
             ]
-        candidates = [
-            (wd, ts) for (wd, ts) in candidate_slots
-            if current_pair is None or (wd, ts) != current_pair
-        ]
+
         if not candidates:
-            summary_before = self.get_group_summary(
-                group, lesson_id, lesson_date, schedule_override=None
-            )
             eff = RescheduleEffect(
                 avg_attendance_before=summary_before.avg_attendance_probability,
                 avg_attendance_after=summary_before.avg_attendance_probability,
@@ -790,12 +888,30 @@ class AttendancePredictor:
             )
 
         best_weekday, best_time_slot = candidates[0]
-        best_effect = self.get_reschedule_effect(
-            group, lesson_id, lesson_date, best_weekday, best_time_slot
+        summary_after_0 = self.get_group_summary(
+            group, lesson_id, lesson_date,
+            schedule_override={"weekday": best_weekday, "time_slot": best_time_slot},
+        )
+        delta_0 = summary_after_0.avg_attendance_probability - summary_before.avg_attendance_probability
+        best_effect = RescheduleEffect(
+            avg_attendance_before=summary_before.avg_attendance_probability,
+            avg_attendance_after=summary_after_0.avg_attendance_probability,
+            delta=round(delta_0, 4),
+            risk_pct_before=summary_before.risk_percentage,
+            risk_pct_after=summary_after_0.risk_percentage,
         )
         for wd, ts in candidates[1:]:
-            eff = self.get_reschedule_effect(
-                group, lesson_id, lesson_date, wd, ts
+            summary_after = self.get_group_summary(
+                group, lesson_id, lesson_date,
+                schedule_override={"weekday": wd, "time_slot": ts},
+            )
+            delta = summary_after.avg_attendance_probability - summary_before.avg_attendance_probability
+            eff = RescheduleEffect(
+                avg_attendance_before=summary_before.avg_attendance_probability,
+                avg_attendance_after=summary_after.avg_attendance_probability,
+                delta=round(delta, 4),
+                risk_pct_before=summary_before.risk_percentage,
+                risk_pct_after=summary_after.risk_percentage,
             )
             if eff.delta > best_effect.delta or (
                 eff.delta == best_effect.delta

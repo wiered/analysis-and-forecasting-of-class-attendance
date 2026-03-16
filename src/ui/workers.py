@@ -255,6 +255,16 @@ def _next_weekdays(start: date, count: int = 5) -> List[date]:
 
 WEEKDAY_NAMES = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 
+# Полные названия дней для лога переноса (англ. из БД → рус.)
+WEEKDAY_FULL_RU = {
+    "Monday": "Понедельник",
+    "Tuesday": "Вторник",
+    "Wednesday": "Среда",
+    "Thursday": "Четверг",
+    "Friday": "Пятница",
+    "Saturday": "Суббота",
+}
+
 
 class SimulationWorker(QObject):
     """
@@ -271,14 +281,15 @@ class SimulationWorker(QObject):
         group: int,
         lesson_id: int,
         start_date: date,
-        reschedule_weekday: str = "Wednesday",
-        reschedule_time_slot: str = "10:30",
+        reschedule_weekday: Optional[str] = None,
+        reschedule_time_slot: Optional[str] = None,
     ):
         super().__init__()
         self.predictor = predictor
         self.group = group
         self.lesson_id = lesson_id
         self.start_date = start_date
+        # None, None — деканат подбирает лучший слот (find_best_reschedule_slot)
         self.reschedule_weekday = reschedule_weekday
         self.reschedule_time_slot = reschedule_time_slot
 
@@ -299,26 +310,7 @@ class SimulationWorker(QObject):
                 lines.append("")
                 lines.append(f"——— День {day_num} ({date_str}, {wd}) ———")
 
-                # Прогноз по группе → «решения» студентов (как в агентах)
-                try:
-                    predictions = self.predictor.predict_group(
-                        self.group, self.lesson_id, date_str, verbose=False
-                    )
-                except Exception as e:
-                    lines.append(f"  [Ошибка прогноза по группе: {e}]")
-                    predictions = []
-
-                for p in predictions:
-                    attend = p.attendance_probability >= 0.5
-                    name = (p.full_name or f"Студент {p.student_id}").strip()
-                    reasons = map_factors(p.top_factors) if p.top_factors else "Нет данных."
-                    decision = "идёт" if attend else "пропускает"
-                    lines.append(f"  [Студент] {name}: решение — {decision}. {reasons}")
-
-                if not predictions:
-                    lines.append("  [Студент] Нет данных по группе.")
-
-                # Mesa: преподаватель и деканат
+                # Сначала шаг модели: преподаватель и деканат принимают решения
                 try:
                     model = AttendanceModel(
                         predictor=self.predictor,
@@ -346,7 +338,61 @@ class SimulationWorker(QObject):
                 deanery_agents = [a for a in model.agents if isinstance(a, DeaneryAgent)]
                 if deanery_agents and deanery_agents[0].decision:
                     dec = deanery_agents[0].decision
-                    lines.append(f"  [Деканат] Расписание: {dec.schedule_decision[:120]}…" if len(dec.schedule_decision) > 120 else f"  [Деканат] Расписание: {dec.schedule_decision}")
+                    deanery_agent = deanery_agents[0]
+                    is_transfer = dec.schedule_decision.startswith("Рекомендуется перенос")
+
+                    if is_transfer:
+                        # Деканат осуществляет перенос; формат: перенос: Среда 8:30 → Понедельник 10:30
+                        current_schedule = self.predictor.get_lesson_schedule(self.lesson_id)
+                        if current_schedule:
+                            from_ru = WEEKDAY_FULL_RU.get(current_schedule[0], current_schedule[0])
+                            from_time = current_schedule[1].lstrip("0") if current_schedule[1].startswith("0") else current_schedule[1]
+                        else:
+                            from_ru = "?"
+                            from_time = "?"
+                        to_ru = WEEKDAY_FULL_RU.get(deanery_agent.new_weekday, deanery_agent.new_weekday)
+                        to_time = (deanery_agent.new_time_slot.lstrip("0") if deanery_agent.new_time_slot.startswith("0") else deanery_agent.new_time_slot)
+                        # Убираем из текста решения первую фразу "Рекомендуется перенос: date → wd ts. "
+                        idx = dec.schedule_decision.find(". ", 0)
+                        reasoning = dec.schedule_decision[idx + 2 :].strip() if idx >= 0 else dec.schedule_decision
+                        lines.append(f"  [Деканат] Расписание: перенос: {from_ru} {from_time} → {to_ru} {to_time}. {reasoning}")
+                        # Студенты получают уведомление и пересчитывают решения по новому расписанию
+                        try:
+                            predictions = self.predictor.predict_group(
+                                self.group, self.lesson_id, date_str,
+                                schedule_override={"weekday": deanery_agent.new_weekday, "time_slot": deanery_agent.new_time_slot},
+                                verbose=False,
+                            )
+                        except Exception as e:
+                            lines.append(f"  [Ошибка прогноза по группе: {e}]")
+                            predictions = []
+                        lines.append(f"  [Деканат] Сообщение {len(predictions)} студентам о переносе пары")
+                        for p in predictions:
+                            attend = p.attendance_probability >= 0.5
+                            name = (p.full_name or f"Студент {p.student_id}").strip()
+                            reasons = map_factors(p.top_factors) if p.top_factors else "Нет данных."
+                            decision = "идёт" if attend else "пропускает"
+                            lines.append(f"  [Студент] {name}: решение — {decision}. {reasons}")
+                        if not predictions:
+                            lines.append("  [Студент] Нет данных по группе.")
+                    else:
+                        lines.append(f"  [Деканат] Расписание: {dec.schedule_decision}")
+                        try:
+                            predictions = self.predictor.predict_group(
+                                self.group, self.lesson_id, date_str, verbose=False
+                            )
+                        except Exception as e:
+                            lines.append(f"  [Ошибка прогноза по группе: {e}]")
+                            predictions = []
+                        for p in predictions:
+                            attend = p.attendance_probability >= 0.5
+                            name = (p.full_name or f"Студент {p.student_id}").strip()
+                            reasons = map_factors(p.top_factors) if p.top_factors else "Нет данных."
+                            decision = "идёт" if attend else "пропускает"
+                            lines.append(f"  [Студент] {name}: решение — {decision}. {reasons}")
+                        if not predictions:
+                            lines.append("  [Студент] Нет данных по группе.")
+
                     lines.append(f"  [Деканат] Аудитория: {dec.classroom_recommendation}")
                     for act in dec.notification_actions:
                         lines.append(f"  [Деканат] Уведомления: {act}")
