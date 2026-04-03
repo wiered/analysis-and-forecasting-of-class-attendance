@@ -30,7 +30,7 @@ class MainWindow(QMainWindow):
         logger.debug("Создание главного окна, predictor=%s", "есть" if predictor else "нет")
         self.setWindowTitle("Посещаемость — поддержка управленческих решений")
         self.setMinimumSize(700, 500)
-        self.resize(900, 600)
+        self.resize(900, 900)
 
         central = QWidget()
         self.setCentralWidget(central)
