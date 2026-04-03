@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, TYPE_CHECKING
 from mesa import Agent
 
-from src.utils import map_group_factors
+from src.utils import map_group_factors, FEATURE_MAP
 
 if TYPE_CHECKING:
     from .attendance_model import AttendanceModel
@@ -112,7 +112,8 @@ class TeacherAgent(Agent):
         if summary.risk_percentage > 20:
             recommendations.append("Провести микроквиз для вовлечённости")
         for gf in summary.top_group_factors[:2]:
-            recommendations.append(f"Учесть фактор риска: {gf.feature}")
+            readable = FEATURE_MAP.get(gf.feature, gf.feature)
+            recommendations.append(f"Учесть фактор риска: {readable}")
 
         tactics = self._select_tactics(summary)
         self.policy = LessonPolicy(

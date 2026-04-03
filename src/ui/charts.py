@@ -9,6 +9,7 @@ from src.model import (
     StudentPrediction,
     FactorImpact,
 )
+from src.utils import FEATURE_MAP
 
 
 def _clear_plot(plot_widget: pg.PlotItem) -> None:
@@ -107,7 +108,12 @@ def plot_top_factors(
     n = len(factors)
     x_pos = list(range(n))
     heights = [f.students_affected for f in factors]
-    labels = [f.feature[:16] + ("…" if len(f.feature) > 16 else "") for f in factors]
+    labels = []
+    for f in factors:
+        readable = FEATURE_MAP.get(f.feature, f.feature)
+        if len(readable) > 16:
+            readable = readable[:16] + "…"
+        labels.append(readable)
     bar = pg.BarGraphItem(x=x_pos, height=heights, width=0.5, brush=pg.mkColor(72, 61, 139))
     plot_widget.addItem(bar)
     plot_widget.getAxis("bottom").setTicks([[(i, labels[i]) for i in range(n)]])
@@ -183,7 +189,12 @@ def plot_student_factors(
     n = len(factors)
     x_pos = list(range(n))
     abs_impacts = [abs(f.impact) for f in factors]
-    labels = [f.feature[:16] + ("…" if len(f.feature) > 16 else "") for f in factors]
+    labels = []
+    for f in factors:
+        readable = FEATURE_MAP.get(f.feature, f.feature)
+        if len(readable) > 16:
+            readable = readable[:16] + "…"
+        labels.append(readable)
     colors = [
         pg.mkColor(220, 20, 60) if "увеличивает" in f.effect else pg.mkColor(34, 139, 34)
         for f in factors

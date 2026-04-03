@@ -17,6 +17,7 @@ from PySide6.QtCore import QDate
 from PySide6.QtGui import QFont
 
 from src.model import AttendancePredictor, GroupSummary, StudentPrediction
+from src.utils import FEATURE_MAP
 
 from .charts import plot_probability_histogram, plot_top_factors
 from .workers import PredictGroupWorker, run_worker
@@ -123,7 +124,11 @@ class DashboardWidget(QWidget):
             )
             factors_text = "Топ факторов по группе:\n"
             for gf in summary.top_group_factors:
-                factors_text += f"  • {gf.feature}: затронуто студентов {gf.students_affected}, средний вклад {gf.avg_impact:.3f}\n"
+                readable = FEATURE_MAP.get(gf.feature, gf.feature)
+                factors_text += (
+                    f"  • {readable}: затронуто студентов {gf.students_affected}, "
+                    f"средний вклад {gf.avg_impact:.3f}\n"
+                )
             self.factors_label.setText(factors_text)
             probs = [r.attendance_probability for r in results]
             plot_probability_histogram(self.plot_hist.getPlotItem(), probs)

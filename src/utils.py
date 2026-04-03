@@ -6,6 +6,31 @@ from typing import List
 from src.model.predict import FactorImpact
 from src.model.predict import GroupSummary
 
+FEATURE_MAP = {
+        "gpa": "успеваемость",
+        "commute_time": "долгая дорога до университета",
+        "works": "наличие работы",
+        "dorm": "проживание в общежитии",
+        "motivation": "мотивация",
+        "discipline": "дисциплина",
+        "anxiety": "тревожность",
+        "burnout": "выгорание",
+        "extraversion": "социальная активность",
+        "deadlines_count": "дедлайны",
+        "avg_attendance_last4": "посещаемость за последние недели",
+        "prev_absence": "предыдущий пропуск занятия",
+        "weekday": "день недели",
+        "time_slot": "время занятия",
+        "duration": "длительность занятия",
+        "early_class": "ранняя пара",
+        "friends_mean_attendance": "посещаемость друзей",
+        "fairness": "восприятие справедливости преподавателя",
+        "clarity": "понятность объяснения преподавателя",
+        "sympathy": "симпатия к преподавателю",
+        "fear": "страх перед преподавателем",
+        "usefulness": "воспринимаемая полезность предмета"
+    }
+
 def map_factors(top_factors: List[FactorImpact]) -> str:
     """
     Формирует текстовое объяснение решения модели

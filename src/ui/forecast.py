@@ -23,6 +23,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtCore import QDate
 
 from src.model import AttendancePredictor, StudentPrediction
+from src.utils import FEATURE_MAP
 
 from .charts import (
     plot_probability_histogram,
@@ -158,6 +159,10 @@ class ForecastWidget(QWidget):
         self._thread.finished.connect(lambda: setattr(self, "_thread", None))
         self._thread.finished.connect(lambda: setattr(self, "_worker", None))
 
+    def _map_feature(self, feature_name: str) -> str:
+        """Возвращает человекочитаемое русское название признака."""
+        return FEATURE_MAP.get(feature_name, feature_name)
+
     def _on_student_result(self, pred: StudentPrediction) -> None:
         self.status_label.setText("")
         lines = [
@@ -167,7 +172,8 @@ class ForecastWidget(QWidget):
             "Топ факторов:",
         ]
         for f in pred.top_factors:
-            lines.append(f"  • {f.feature}: {f.effect} (вклад {f.impact:.3f})")
+            readable = self._map_feature(f.feature)
+            lines.append(f"  • {readable}: {f.effect} (вклад {f.impact:.3f})")
         self.student_result.setText("\n".join(lines))
         plot_student_factors(self.plot_student_factors.getPlotItem(), pred.top_factors)
 
@@ -176,7 +182,7 @@ class ForecastWidget(QWidget):
         self.group_table.setRowCount(len(results))
         for i, pred in enumerate(results):
             name = pred.full_name or "—"
-            factors_short = "; ".join(f.feature for f in pred.top_factors[:3])
+            factors_short = "; ".join(self._map_feature(f.feature) for f in pred.top_factors[:3])
             self.group_table.setItem(i, 0, QTableWidgetItem(name))
             self.group_table.setItem(i, 1, QTableWidgetItem(str(pred.student_id)))
             self.group_table.setItem(i, 2, QTableWidgetItem(f"{pred.attendance_probability:.2%}"))
